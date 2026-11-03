@@ -1,0 +1,14 @@
+{
+  "name": "surge-gui-worker",
+  "version": "1.0.0",
+  "description": "Surge GUI 的 Cloudflare Worker 版 - 单文件 Worker，代理 Surge API + 浏览器端文件处理",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "dry-run": "wrangler deploy --dry-run"
+  },
+  "devDependencies": {
+    "wrangler": "^3.97.0"
+  }
+}

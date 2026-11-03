@@ -1,0 +1,36 @@
+# Cloudflare Worker 部署配置
+# 本地预览:  wrangler dev
+# 生产部署:  wrangler deploy
+# GitHub Builds:  仓库根目录放此文件 + worker.js + package.json
+
+name = "surge-gui"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+# ===== Secrets（不要在这里填值，在 Cloudflare Dashboard 设置）=====
+# Workers & Pages → 选你的 Worker → Settings → Variables → Secrets
+#
+# 必需（3 个）:
+#   SURGE_TOKEN    = 你的 Surge API Token（在命令行执行 npx surge token 获取）
+#   PASSPHRASE     = 自己设的访问口令（防止 URL 泄露后别人能操作账号）
+#
+# 可选（推荐）:
+#   SESSION_SECRET = 32+ 字符随机串，用于签名 cookie（不设也能跑，只是 cookie 不签名）
+#
+# 也可以用 wrangler CLI 设置:
+#   wrangler secret put SURGE_TOKEN
+#   wrangler secret put PASSPHRASE
+#   wrangler secret put SESSION_SECRET
+#
+# ===== 重要安全提醒 =====
+# worker.js 里绝对不能出现任何 token/口令明文！
+# Secrets 只在 Cloudflare 面板配置，代码里通过 env.SURGE_TOKEN 等读取
+# 仓库公开也没关系，但泄露 Secrets 等于交出你的 Surge 账号
+
+# ===== 本项目架构 =====
+# Worker 是无状态的，不需要 KV、D1、R2 等额外依赖
+# 文件全部在浏览器内存里处理（JSZip 解压 + CompressionStream 构建 tar.gz）
+# Worker 只做 API 代理 + Secrets 注入
+#
+# Cloudflare Workers 免费版请求体最大 100MB，发布的 tar.gz 一般远小于此
+# 如果文件超过 100MB，请付费升级或拆分站点
