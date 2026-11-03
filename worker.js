@@ -54,7 +54,11 @@ function setSessionCookie(passphrase, sessionSecret) {
   const payload = salt + '.' + timestamp + '.' + passphrase;
   const mac = sessionSecret ? simpleHash(payload + '|' + sessionSecret) : simpleHash(payload);
   const value = btoa(unescape(encodeURIComponent(payload + '|' + mac)));
-  return `${SESSION_COOKIE}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800`;
+  // Secure: workers.dev 和自定义域名 HTTPS 都支持 Secure cookie；
+  // 本地 wrangler dev 是 http，但 set-cookie 在 http 下会被浏览器拒绝，
+  // 这里统一加 Secure——用户真实部署走 HTTPS 没问题，本地 dev 可以
+  // 通过 Secure flag 不影响 cookie 的 Path/HttpOnly 语义。
+  return `${SESSION_COOKIE}=${value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800`;
 }
 
 function verifySessionCookie(cookieValue, passphrase, sessionSecret) {
@@ -118,7 +122,8 @@ export default {
     }
 
     try {
-      // ===== 不需要鉴权的路由 =====
+      // ===== 0) 公开白名单路由（健康检查等，最顶层优先匹配） =====
+
       if (path === '/health' && request.method === 'GET') {
         return jsonResponse({
           ok: true,
@@ -128,6 +133,36 @@ export default {
           passphraseConfigured: !!env.PASSPHRASE
         });
       }
+
+      // ===== 1) 非 API 路径永远返回前端页面（或小工具路由） =====
+      //    前端自己会调 /api/config 决定显示登录框还是主界面。
+      //    这里绝对不能套鉴权守卫，否则 / 也被 401 JSON 拦截。
+
+      // 浏览器收藏夹图标——直接空响应
+      if (path === '/favicon.ico' && request.method === 'GET') {
+        return new Response(null, { status: 204 });
+      }
+
+      // 根路径、任意非 /api/ 路径：一律返回 HTML
+      // 这样即使用户绑定自定义域名，访问 https://xxx/ 也能拿到页面，
+      // 浏览器渲染出来后 JS 会自己判断登录态。
+      if (!path.startsWith('/api/')) {
+        return new Response(serveHTML(), {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/html; charset=utf-8',
+            // no-store 强制每次都从服务器取，防止浏览器缓存住旧的 401 JSON 或旧页面
+            'Cache-Control': 'no-store, no-cache, must-revalidate, private',
+            'Pragma': 'no-cache',
+            'Expires': '0',
+            // 允许内联 script（我们移除了所有内联事件，但 <script> 块仍是内联）
+            'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline' cdn.tailwindcss.com cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' cdn.jsdelivr.net; img-src 'self' data:; font-src 'self' data:; connect-src 'self' surge.surge.sh; base-uri 'self'; form-action 'self';"
+          }
+        });
+      }
+
+      // ===== 2) /api/* 路由开始 =====
+      //    login/logout/config 是公开的；/api/surge/* 才需要鉴权。
 
       if (path === '/api/login' && request.method === 'POST') {
         const body = await readJson(request);
@@ -144,7 +179,7 @@ export default {
 
       if (path === '/api/logout' && request.method === 'POST') {
         return jsonResponse({ ok: true }, 200, {
-          'Set-Cookie': `${SESSION_COOKIE}=deleted; Path=/; HttpOnly; Max-Age=0`
+          'Set-Cookie': `${SESSION_COOKIE}=deleted; Path=/; HttpOnly; Secure; Max-Age=0; SameSite=Lax`
         });
       }
 
@@ -159,7 +194,7 @@ export default {
         });
       }
 
-      // ===== 其余路由需要鉴权 =====
+      // ===== 3) 其余 /api/* 路由 —— 需要鉴权 =====
       if (!requireAuth(request, env) && env.PASSPHRASE) {
         return errorResponse('请先登录', 401);
       }
@@ -172,15 +207,8 @@ export default {
         return handleSurgeProxy(request, env, path);
       }
 
-      // 默认：返回前端页面
-      return new Response(serveHTML(), {
-        headers: {
-          'Content-Type': 'text/html; charset=utf-8',
-          'Cache-Control': 'no-cache',
-          // 允许内联 script（我们移除了所有内联事件，但 <script> 块仍是内联）
-          'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline' cdn.tailwindcss.com cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' cdn.jsdelivr.net; img-src 'self' data:; font-src 'self' data:; connect-src 'self' surge.surge.sh; base-uri 'self'; form-action 'self';"
-        }
-      });
+      // 兜底：未知 API 路由
+      return errorResponse('未知 API 路由：' + path, 404);
 
     } catch (e) {
       console.error('[worker error]', e);
