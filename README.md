@@ -1,10 +1,14 @@
 # Surge GUI · Cloudflare Worker 部署手册
 
+> **当前版本：v2.0.0（2026-11-03 修复）**
+> 
+> v1 → v2 修复了 **全量按钮 ReferenceError**（teardownSite 的反引号双重转义导致整个 `<script>` 块 SyntaxError）、移除所有内联事件改 addEventListener、加 window.onerror 兜底、加 CSP 响应头、加 CompressionStream 降级提示。
+
 把 `worker/` 目录下的 **3 个文件** 部署到 Cloudflare Workers，就能得到一个公网可用的 Surge 发布工具。
 
 ```
 worker/
-├── worker.js       ← Worker 主程序（39KB，单文件）
+├── worker.js       ← Worker 主程序（53KB，单文件，ESM）
 ├── wrangler.toml   ← 部署配置（name / main / compatibility_date）
 └── package.json    ← npm 依赖声明（wrangler CLI）
 ```
@@ -15,7 +19,7 @@ worker/
 
 ## ⚠️ 安全红线（必读）
 
-1. **worker.js 里绝对不能出现 token / 口令明文**。我已经检查过，代码里零明文。
+1. **worker.js 里绝对不能出现 token / 口令明文**。已检查，代码里零明文。
 2. **Secrets 只在 Cloudflare 面板配置**。不要填到 wrangler.toml 或任何会进 Git 的文件里。
 3. 仓库公开也没关系——只要 Secrets 没泄露，代码里不包含凭据，就安全。
 4. 但**泄露 Secrets 等于交出你的 Surge 账号**，别人可以发布/下线你所有域名。
@@ -69,7 +73,7 @@ surge-gui-worker/
 提交推送：
 ```bash
 git add worker.js wrangler.toml package.json
-git commit -m "init: surge-gui worker"
+git commit -m "init: surge-gui worker v2"
 git push origin main
 ```
 
@@ -128,48 +132,90 @@ git push origin main
 
 ---
 
-## 常见问题
+## 常见报错 / 故障排查（按出现概率排序）
 
-### Q: 访问 .workers.dev 直接白屏 / 500？
-打开浏览器控制台（F12），看 Network 面板：
-- `/api/health` 返回 500 → **Secrets 没配**（Worker 代码里 `env.SURGE_TOKEN` 是 undefined）。去 Settings → Variables 里加。
-- `/api/login` 返回 401 → 口令错了。
+### ❌ 页面白屏 / 所有按钮点了都报错 "XXX is not defined"
 
-### Q: 发布报 "401 Unauthorized"？
-Token 失效了。命令行重新 `npx --yes surge token` 拿新的 → Cloudflare Dashboard → Workers → Settings → Variables → 修改 SURGE_TOKEN → Save and Deploy。
+**历史上发生过一次**（v1 teardownSite 反引号双重转义 bug）。现在 v2 已经修干净，HTML 里 0 个内联事件，所有事件用 DOMContentLoaded + addEventListener 绑定。
 
-### Q: 发布报 "429 Too Many Requests"？
-Surge 限流了。免费账号每 15 分钟 60 次，等一会儿再试。或者换个 Surge 账号。
+如果你还是遇到，打开浏览器控制台（F12）看第一条错误：
+- 如果是 **SyntaxError**（例如 `Invalid or unexpected token`）：Worker 代码粘贴时丢了字符。重新完整复制 worker.js 粘贴。
+- 如果是 **ReferenceError** 函数未定义：说明 Worker 返回的 HTML 里 `<script>` 有语法错误导致整个 script 不执行。检查 Cloudflare Dashboard 上 Worker 的实时日志。
+- 页面顶部会自动出现 **红色全局错误条**（v2 新增），直接把错误信息复制发给开发者。
 
-### Q: 发布报 "403 Unable to publish. Application too large"？
-Surge 限制 10,100 个文件 / 450 MB。检查一下是不是误打包了 node_modules 或大型视频。
+### ⚠️ 控制台报 `ERR_BLOCKED_BY_CLIENT` 指向 `static.cloudflareinsights.com/beacon.min.js`
 
-### Q: 免费版用不了自定义域名 HTTPS？
-对。免费版自定义域名只能 HTTP，自签证书 Chrome 会警告。两个解法：
+这不是 bug——是 Cloudflare **自动注入的 Web Analytics 脚本** 被你的浏览器广告拦截插件（uBlock Origin / AdGuard / 360 浏览器广告拦截）拦截了。
+
+**这不影响 Surge GUI 正常使用**——那个脚本只是 Cloudflare 的访问统计，不阻塞我们的任何功能。如果想让控制台干净点：
+1. Cloudflare Dashboard → **Analytics & Logs** → **Web Analytics** → 找到你那个 Worker 的 analytics 源 → 禁用
+2. 或者在广告拦截插件里对 `*.workers.dev` 整个域名放行
+
+### ❌ 登录后点按钮报 fetch 错误 / 401 / 500
+
+打开 F12 → Network 面板，看具体是哪个 API 报错：
+
+| 报错 | 原因 | 解决 |
+|------|------|------|
+| `/api/config` 401 | Cookie 会话失效 / 被清了 | 回到登录页重新输口令 |
+| `/api/surge/account` 500 + "SURGE_TOKEN Secret" | Worker 没配置 SURGE_TOKEN | Cloudflare Dashboard → Workers → Settings → Variables → 加 Secret |
+| `/api/surge/account` 401 | Token 过期 / 被撤销 | `npx surge token` 拿新的 → 修改 Secret |
+| `/api/surge/publish` 401 | Token 失效 | 同上 |
+| `/api/surge/publish` 403 | Surge 不让发（限流 / 域名冲突 / 配额） | 看发布日志里 Surge 返回的具体 NDJSON 错误 |
+| `/api/surge/publish` 429 | Surge 限流 | 每 15 分钟 60 次，等会儿再试 |
+| `CompressionStream is not defined` | 浏览器太老 | 需要 Chrome 80+ / Edge 80+ / Safari 16.4+ / Firefox 113+ |
+
+### ❌ 发布报 "Application too large"
+
+Surge 限制 **10,100 个文件 / 450 MB**。检查是不是误打包了 node_modules 或大型视频。v2 的 tar.gz 是浏览器端构建，Worker 不做二次处理。
+
+### ❌ Workers Builds 构建报错 `No module named wrangler` / `ESBuild not found`
+
+package.json 必须和 worker.js **在同一目录**（仓库根目录）。Cloudflare 只在根目录跑 `npm ci`。
+
+### ❌ 免费版自定义域名 HTTPS 不行
+
+对。免费版自定义域名只能 HTTP。两个解法：
 - 付费 Surge Plus（$13/月起）
-- 用 Cloudflare 做 **代理**：把域名 NS 指向 Cloudflare → Cloudflare 自动签 Let's Encrypt 证书 → Cloudflare 代理流量到 Surge（免费）。这样你既有 HTTPS 又不用付费 Surge。
-
-### Q: Workers Builds 构建报错 `No module named wrangler`？
-检查 package.json 是否正确复制了。Build command 是 `npx wrangler deploy`——Cloudflare 会自动 `npm ci` 装依赖。
-
-### Q: 想改 Worker 名字？
-wrangler.toml 里 `name = "surge-gui"` 改成你想要的，然后 `wrangler deploy` 或推 GitHub 仓库。名字决定了 `.workers.dev` 子域名。
+- 用 Cloudflare 做 **代理**：把域名 NS 指向 Cloudflare → Cloudflare 自动签 Let's Encrypt 证书 → Cloudflare 代理流量到 Surge（免费）
 
 ---
 
-## 架构说明（开发者视角）
+## 架构说明（v2）
 
 ```
-浏览器 ──────────── Cloudflare Worker ──────────── Surge API
-  │                      │                             │
-  │  JSZip 解压           │  HTTP Basic auth            │ PUT /:domain
-  │  Map 文件内存         │ Basic(username: "token",    │ tar.gz body
-  │  tar.gz gzip 构建     │          password: token)   │ NDJSON 流返回
-  │  POST tar.gz          │ ← Secret 注入              │
-  │                       │                             │
-  │  口令登录             │ Cookie 会话（FNV-1a 签名）  │
-  │  无 token 在前端暴露  │                             │
-  └───────────────────────┴─────────────────────────────┘
+浏览器 ───────────── Cloudflare Worker ────────────── Surge API
+  │                        │                               │
+  │  JSZip 解压             │  HTTP Basic auth              │ PUT /:domain
+  │  Map 文件内存           │ Basic(username: "token",      │ tar.gz body
+  │  CompressionStream gzip │          password: token)     │ NDJSON 流返回
+  │  tar.gz 构建            │ ← SURGE_TOKEN Secret 注入     │
+  │  POST tar.gz            │                               │
+  │  全局错误条 兜底         │ Cookie 会话（FNV-1a 签名）   │
+  │  0 内联事件 (addEventListener 统一绑定)                 │
+  │  window.onerror 捕获    │ CSP 响应头                    │
+  └────────────────────────┴───────────────────────────────┘
 ```
 
-Worker **不存储任何文件**——无状态、可随时重启、可多实例边缘节点同时服务。
+**Worker 不存储任何文件**——无状态、可随时重启、可多实例边缘节点同时服务。
+
+### 关键路由
+
+| 路由 | 鉴权 | 说明 |
+|------|------|------|
+| `GET /health` | 否 | 健康检查，返回 version / tokenConfigured / passphraseConfigured |
+| `POST /api/login` | 否 | 提交 PASSPHRASE，设置 Cookie |
+| `POST /api/logout` | 否 | 清 Cookie |
+| `GET /api/config` | 否 | 只返回 boolean（loggedIn / tokenConfigured），**不回显任何 Secret** |
+| `GET /api/surge/account` | 是 | 代理 Surge /account（检测 token 有效性） |
+| `GET /api/surge/list` | 是 | 代理 Surge /list |
+| `POST /api/surge/publish?domain=xxx` | 是 | 代理 PUT /:domain，流式透传 NDJSON |
+| `POST /api/surge/teardown?domain=xxx` | 是 | 代理 DELETE /:domain |
+
+### 安全设计
+
+- **Secret 缺失** → 前端不会拿到空 token，但 Worker 在 `/api/surge/*` 路由上会返回明确的 500 + 消息提示
+- **Token 永不回显** → `/api/config` 只返回 boolean
+- **口令 Cookie 签名** → FNV-1a 哈希 + timestamp + salt，7 天过期
+- **CSP** → Worker 返回页面时带上 `script-src 'unsafe-inline' 'self' cdn.tailwindcss.com cdn.jsdelivr.net`，只允许这三个来源的脚本
+- **Cookie HttpOnly** → 前端 JS 读不到 `surge_gui_session`，防 XSS 窃取
